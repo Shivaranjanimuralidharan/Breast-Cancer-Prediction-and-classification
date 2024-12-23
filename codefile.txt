@@ -1,0 +1,433 @@
+CODE FOR U-NET SEGMENTATION AND CNN CLASSIFICATION
+----------------------------------------------------
+
+TO UNZIP THE FOLDER:
+---------------------
+
+import zipfile
+with zipfile.ZipFile('training-b.zip', 'r') as zip_ref:
+    zip_ref.extractall('dataset_Mlb')
+
+
+TO VERIFY WHETHER THE FOLDER IS UNZIPPED:
+------------------------------------------
+import os
+os.listdir('dataset_Mlb')
+
+#PART-1
+
+
+#TRAINING CODE
+---------------
+
+import torch
+from PIL import Image
+import glob
+import numpy as np
+
+# Define a function to preprocess the image
+def preprocess_image(image, target_size=(128, 128)):
+    # Resize the image
+    image = image.resize(target_size)
+    # Convert image to tensor and normalize if needed
+    image_tensor = torch.tensor(np.array(image)).unsqueeze(0).float()  # Add channel dimension
+    image_tensor = image_tensor / 255.0  # Normalize to [0, 1]
+    return image_tensor
+
+# Define a function to get avg_score and max_score for an image
+def get_scores(image, model):
+    image_tensor = preprocess_image(image)
+    image_tensor = image_tensor.unsqueeze(0)  # Add batch dimension
+    with torch.no_grad():
+        model_output = model(image_tensor)
+    model_output = torch.sigmoid(model_output)
+    avg_score = model_output.mean().item()
+    max_score = model_output.max().item()
+    return avg_score, max_score
+
+# Function to evaluate a dataset and print scores
+def evaluate_scores_on_dataset(dataset_path, model, label):
+    avg_scores = []
+    max_scores = []
+
+    for image_path in glob.glob(f"{dataset_path}/*.png"):
+        print(f"Evaluating {image_path}...")
+        image = Image.open(image_path).convert("L")
+        
+        avg_score, max_score = get_scores(image, model)
+        avg_scores.append(avg_score)
+        max_scores.append(max_score)
+
+        # Clear GPU cache if using a GPU
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    # Print average scores for the category
+    print(f"\n{label.capitalize()} Images:")
+    print(f"Average of avg_scores: {np.mean(avg_scores):.4f}")
+    print(f"Average of max_scores: {np.mean(max_scores):.4f}")
+
+# Evaluate benign, malignant, and normal datasets
+evaluate_scores_on_dataset("dataset_MLtrb/training-b", model, label="benign")
+evaluate_scores_on_dataset("dataset_MLtrb/training-m", model, label="malignant")
+evaluate_scores_on_dataset("dataset_MLtrb/training-n", model, label="normal")  # Added normal images evaluation
+
+
+#Testing code
+-------------
+
+
+#step-1
+---------
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+from PIL import Image
+import os
+import matplotlib.pyplot as plt
+
+
+
+
+
+#step-2
+----------
+import torch.nn.functional as F
+
+class UNet(nn.Module):
+    def __init__(self, n_channels, n_classes):
+        super(UNet, self).__init__()
+        
+        # Encoder
+        self.down1 = self.conv_block(n_channels, 64)
+        self.down2 = self.conv_block(64, 128)
+        self.down3 = self.conv_block(128, 256)
+        self.down4 = self.conv_block(256, 512)
+
+        # Decoder
+        self.up1 = self.upconv_block(512, 256)
+        self.up2 = self.upconv_block(256 + 256, 128)  # Add the size of down3 to up2
+        self.up3 = self.upconv_block(128 + 128, 64)   # Add the size of down2 to up3
+        self.up4 = self.upconv_block(64 + 64, n_classes)  # Add the size of down1 to up4
+
+    def conv_block(self, in_channels, out_channels):
+        return nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True)
+        )
+
+    def upconv_block(self, in_channels, out_channels):
+        return nn.Sequential(
+            nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        # Encoder path
+        x1 = self.down1(x)
+        x2 = self.down2(x1)
+        x3 = self.down3(x2)
+        x4 = self.down4(x3)
+
+        # Decoder path with concatenation and resizing the encoder outputs
+        x = self.up1(x4)
+        x3_resized = F.interpolate(x3, size=x.shape[2:], mode='bilinear', align_corners=False)  # Resize x3 to match x
+        x = torch.cat([x, x3_resized], dim=1)  # Concatenate the encoder output (x3) with decoder output (x)
+        
+        x = self.up2(x)
+        x2_resized = F.interpolate(x2, size=x.shape[2:], mode='bilinear', align_corners=False)  # Resize x2 to match x
+        x = torch.cat([x, x2_resized], dim=1)  # Concatenate the encoder output (x2) with decoder output (x)
+        
+        x = self.up3(x)
+        x1_resized = F.interpolate(x1, size=x.shape[2:], mode='bilinear', align_corners=False)  # Resize x1 to match x
+        x = torch.cat([x, x1_resized], dim=1)  # Concatenate the encoder output (x1) with decoder output (x)
+        
+        x = self.up4(x)
+        
+        return x
+
+
+
+
+
+
+#step-3
+---------
+
+def preprocess_image(image):
+    image = image.resize((128, 128))
+    image = np.array(image) / 255.0  # Normalize to [0, 1]
+    image = np.expand_dims(image, axis=0)  # Add batch dimension
+    image = np.expand_dims(image, axis=0)  # Add channel dimension (grayscale)
+    return torch.tensor(image, dtype=torch.float32)
+
+
+def segment_tumor(image, model):
+    image = preprocess_image(image)
+    with torch.no_grad():
+        output = model(image)
+    
+    mask = torch.sigmoid(output).squeeze().cpu().numpy() > 0.5
+    return mask
+def visualize_output(image, mask, model_output):
+    # Visualize the original image, mask, and the classification output
+    plt.figure(figsize=(10, 7))
+    plt.subplot(1, 3, 1)
+    plt.imshow(image, cmap='gray')
+    plt.title("Original Image")
+    
+    plt.subplot(1, 3, 2)
+    plt.imshow(mask, cmap='gray')
+    plt.title("Tumor Mask")
+    
+    plt.subplot(1, 3, 3)
+    plt.imshow(torch.sigmoid(model_output).squeeze().cpu().numpy(), cmap='hot')
+    plt.title("Model Output (Sigmoid)")
+    plt.show()
+
+
+
+
+
+#step-4
+---------
+import numpy as np
+import torch
+
+def locate_tumor(mask):
+    # Find the coordinates of the tumor in the mask
+    tumor_coords = np.argwhere(mask)  # Coordinates where the tumor (1) is located
+    if tumor_coords.size == 0:
+        return "No Tumor Detected"
+    
+    # Find the centroid of the tumor
+    y, x = tumor_coords.mean(axis=0)  # Get the mean x, y coordinate
+    
+    if x < mask.shape[1] / 2 and y < mask.shape[0] / 2:
+        return "Upper Left"
+    elif x > mask.shape[1] / 2 and y < mask.shape[0] / 2:
+        return "Upper Right"
+    elif x < mask.shape[1] / 2 and y > mask.shape[0] / 2:
+        return "Lower Left"
+    elif x > mask.shape[1] / 2 and y > mask.shape[0] / 2:
+        return "Lower Right"
+    else:
+        return "Center"
+
+def measure_tumor_size(mask):
+    tumor_area = np.sum(mask)  # Number of pixels in the tumor
+    return tumor_area
+
+def classify_tumor(mask, model_output):
+    # Use a more comprehensive scoring method
+    model_output = torch.sigmoid(model_output)  # Apply sigmoid to get probabilities
+    avg_score = model_output.mean().item()
+    max_score = model_output.max().item()
+    print(f"Average Score: {avg_score}")
+    print(f"Max Score: {max_score}")
+    
+    # Classify based on scores
+    result = classify_image(avg_score, max_score)
+    return result
+
+import numpy as np
+import torch
+
+def classify_tumor(mask, model_output):
+    # Apply sigmoid to the model output to get probabilities
+    model_output = torch.sigmoid(model_output).squeeze().numpy()
+
+    # Calculate metrics for classification
+    avg_score = model_output.mean()
+    max_score = model_output.max()
+    std_dev = model_output.std()
+
+    # Print scores for debugging and understanding
+    print(f"Average Score: {avg_score:.4f}")
+    print(f"Max Score: {max_score:.4f}")
+    print(f"Standard Deviation: {std_dev:.4f}")
+
+    if avg_score > 0.54 and max_score < 0.67:
+        return "Malignant"
+    elif avg_score > 0.5 and max_score < 0.6241:
+        return "Benign"
+    else:
+        return "Normal"
+
+
+
+
+#step-5
+--------
+
+import glob
+import torch
+from PIL import Image
+
+# Assuming UNet is already defined
+def analyze_tumor_from_dataset(dataset_path, model):
+    model.eval()
+    for image_path in glob.glob(f"{dataset_path}/*.png"):
+        print(f"Analyzing {image_path}...")
+        image = Image.open(image_path).convert("L")
+        
+        # Segment the tumor, locate it, measure its size, and classify
+        mask = segment_tumor(image, model)
+        location = locate_tumor(mask)
+        size = measure_tumor_size(mask)
+        
+        # Assuming the output of the model is passed for classification (model_output)
+        with torch.no_grad():
+            model_output = model(preprocess_image(image))  # Model output (e.g., sigmoid or softmax)
+        
+        # Classify the tumor
+        classification = classify_tumor(mask, model_output)  # Passing the model output here
+        visualize_output(image, mask, model_output)
+        # Output results
+        print(f"Tumor Location: {location}")
+        print(f"Tumor Size (Area in pixels): {size}")
+        print(f"Tumor Classification: {classification}\n")
+
+
+
+
+#step-6
+---------
+# Provide the path to your dataset folder
+dataset_path = "path_of_your_dataset"
+
+# Assuming you have loaded a pretrained U-Net model
+model = UNet(n_channels=1, n_classes=1)
+
+# Analyze the entire dataset
+analyze_tumor_from_dataset(dataset_path, model)
+
+
+#PART-2
+
+CODE FOR GRAD-CAM 
+-------------------
+
+import torch
+import torch.nn.functional as F
+from torch.autograd import Function
+import numpy as np
+import cv2
+from torchvision import models, transforms
+from torch.utils.data import DataLoader
+from torchvision import datasets
+import matplotlib.pyplot as plt
+
+class GradCAM:
+    def __init__(self, model, target_layer):
+        self.model = model
+        self.target_layer = target_layer
+        self.gradients = None
+        self.activations = None
+
+        # Register hooks for the target layer
+        self.hook_handles = []
+        self.hook_handles.append(self.target_layer.register_forward_hook(self.save_activation))
+        self.hook_handles.append(self.target_layer.register_backward_hook(self.save_gradient))
+
+    def save_activation(self, module, input, output):
+        self.activations = output
+
+    def save_gradient(self, module, grad_input, grad_output):
+        self.gradients = grad_output[0]
+
+    def __call__(self, input_image):
+        # Forward pass
+        self.model(input_image)
+        
+        # Backward pass to get the gradients
+        self.model.zero_grad()
+        output = self.model(input_image)
+        class_idx = torch.argmax(output, dim=1)  # Get the predicted class
+        output[:, class_idx].backward()  # Backpropagate the gradient
+
+        # Compute Grad-CAM
+        gradients = self.gradients
+        activations = self.activations
+        weights = torch.mean(gradients, dim=[2, 3], keepdim=True)  # Global Average Pooling over the gradients
+        cam = torch.sum(weights * activations, dim=1, keepdim=True)  # Weighted sum of activations
+        
+        # Apply ReLU to the Grad-CAM (since we only care about positive influences)
+        cam = F.relu(cam)
+
+        # Normalize the Grad-CAM
+        cam = cam.squeeze().cpu().detach().numpy()
+        cam = np.maximum(cam, 0)  # Ensure no negative values
+        cam = cv2.resize(cam, (input_image.shape[2], input_image.shape[3]))  # Resize to match input size
+        cam = cam - np.min(cam)
+        cam = cam / np.max(cam)  # Normalize between 0 and 1
+        
+        return cam
+
+    def overlay_heatmap(self, image, cam, alpha=0.5):
+        """
+        Overlays the Grad-CAM heatmap onto the original image.
+        `alpha` controls the transparency of the heatmap.
+        """
+        # Convert the image from tensor to numpy array
+        image = image.squeeze().permute(1, 2, 0).cpu().detach().numpy()
+        image = np.clip(image, 0, 1)
+
+        # Create a heatmap colormap (jet)
+        heatmap = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
+
+        # Resize the heatmap to match the image size (if needed)
+        heatmap = cv2.resize(heatmap, (image.shape[1], image.shape[0]))
+
+        # Overlay the heatmap onto the image
+        superimposed_img = heatmap * alpha + image * (1 - alpha)
+
+        return superimposed_img
+
+    def remove_hooks(self):
+        for handle in self.hook_handles:
+            handle.remove()
+
+# Assuming `input_image` is a Tensor of shape [batch_size, 3, 224, 224]
+# Create a DataLoader for your dataset
+dataset_dir = 'path_of_your_dataset'
+dataset = datasets.ImageFolder(dataset_dir, transform=transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+]))
+dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
+
+# Define model and target layer
+model = models.resnet50(pretrained=True)  # Example: Use ResNet-50, or your custom model
+target_layer = model.layer4[2].conv3  # Example: Choose a target layer in ResNet-50
+
+# Initialize Grad-CAM
+grad_cam = GradCAM(model, target_layer)
+
+# Move model to CPU (ensure model is on the CPU)
+model = model.cpu()
+
+# Loop through the dataset and generate Grad-CAM for each image
+for idx, (image, label) in enumerate(dataloader):
+    print(f"Processing image {idx+1}/{len(dataloader)}")
+
+    # Ensure image is on the same device as the model (both should be on CPU)
+    image = image.cpu()  # No need for .cuda() since we're using CPU
+
+    # Generate Grad-CAM output
+    grad_cam_output = grad_cam(image)
+
+    # Overlay the heatmap on the original image
+    superimposed_image = grad_cam.overlay_heatmap(image, grad_cam_output, alpha=0.5)
+
+    # Visualize the Grad-CAM output with overlay
+    plt.imshow(superimposed_image)
+    plt.title(f"Grad-CAM Overlay for Image {idx+1}")
+    plt.show()
+
+# Remove the hooks after processing
+grad_cam.remove_hooks()
+
